@@ -211,6 +211,19 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
 
 #pragma mark - NSNotificationCenter Observers
 
+-(NSString*)generateRandomString:(int)num {
+  NSMutableString* string = [NSMutableString stringWithCapacity:num];
+  for (int i = 0; i < num; i++) {
+    [string appendFormat:@"%C", (unichar)('a' + arc4random_uniform(26))];
+  }
+  return string;
+}
+
+-(NSString*)extractMessageId:(NSDictionary *)remoteNotification {
+  NSString* messageId = remoteNotification[@"gcm.message_id"];
+  return messageId != nil ? messageId : [self generateRandomString:10];
+}
+
 - (void)application_onDidFinishLaunchingNotification:(nonnull NSNotification *)notification {
   // Setup UIApplicationDelegate.
 #if TARGET_OS_OSX
@@ -223,7 +236,7 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
     // If remoteNotification exists, it is the notification that opened the app.
     _initialNotification =
         [FLTFirebaseMessagingPlugin remoteMessageUserInfoToDict:remoteNotification];
-    _initialNotificationID = remoteNotification[@"gcm.message_id"];
+    _initialNotificationID = [self extractMessageId:remoteNotification];
   }
   _initialNotificationGathered = YES;
   [self initialNotificationCallback];
@@ -326,8 +339,7 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
   // this fix)
   NSString *notificationIdentifier = notification.request.identifier;
 
-  if (notification.request.content.userInfo[@"gcm.message_id"] &&
-      ![notificationIdentifier isEqualToString:_foregroundUniqueIdentifier]) {
+  if (![notificationIdentifier isEqualToString:_foregroundUniqueIdentifier]) {
     NSDictionary *notificationDict =
         [FLTFirebaseMessagingPlugin NSDictionaryFromUNNotification:notification];
     [_channel invokeMethod:@"Messaging#onMessage" arguments:notificationDict];
@@ -365,11 +377,9 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
              withCompletionHandler:(void (^)(void))completionHandler
     API_AVAILABLE(macos(10.14), ios(10.0)) {
   NSDictionary *remoteNotification = response.notification.request.content.userInfo;
-  _notificationOpenedAppID = remoteNotification[@"gcm.message_id"];
   // We only want to handle FCM notifications and stop firing `onMessageOpenedApp()` when app is
   // coming from a terminated state.
-  if (_notificationOpenedAppID != nil &&
-      ![_initialNotificationID isEqualToString:_notificationOpenedAppID]) {
+  if (![_initialNotificationID isEqualToString:_notificationOpenedAppID]) {
     NSDictionary *notificationDict =
         [FLTFirebaseMessagingPlugin remoteMessageUserInfoToDict:remoteNotification];
     [_channel invokeMethod:@"Messaging#onMessageOpenedApp" arguments:notificationDict];
@@ -467,66 +477,63 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
   NSDictionary *notificationDict =
       [FLTFirebaseMessagingPlugin remoteMessageUserInfoToDict:userInfo];
   // Only handle notifications from FCM.
-  if (userInfo[@"gcm.message_id"]) {
-    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
-      __block BOOL completed = NO;
+  if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+    __block BOOL completed = NO;
 
-      // If app is in background state, register background task to guarantee async queues aren't
-      // frozen.
-      UIBackgroundTaskIdentifier __block backgroundTaskId =
-          [application beginBackgroundTaskWithExpirationHandler:^{
-            @synchronized(self) {
-              if (completed == NO) {
-                completed = YES;
-                completionHandler(UIBackgroundFetchResultNewData);
-                if (backgroundTaskId != UIBackgroundTaskInvalid) {
-                  [application endBackgroundTask:backgroundTaskId];
-                  backgroundTaskId = UIBackgroundTaskInvalid;
-                }
+    // If app is in background state, register background task to guarantee async queues aren't
+    // frozen.
+    UIBackgroundTaskIdentifier __block backgroundTaskId =
+        [application beginBackgroundTaskWithExpirationHandler:^{
+          @synchronized(self) {
+            if (completed == NO) {
+              completed = YES;
+              completionHandler(UIBackgroundFetchResultNewData);
+              if (backgroundTaskId != UIBackgroundTaskInvalid) {
+                [application endBackgroundTask:backgroundTaskId];
+                backgroundTaskId = UIBackgroundTaskInvalid;
               }
             }
-          }];
+          }
+        }];
 
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25 * NSEC_PER_SEC)),
-                     dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-                       @synchronized(self) {
-                         if (completed == NO) {
-                           completed = YES;
-                           completionHandler(UIBackgroundFetchResultNewData);
-                           if (backgroundTaskId != UIBackgroundTaskInvalid) {
-                             [application endBackgroundTask:backgroundTaskId];
-                             backgroundTaskId = UIBackgroundTaskInvalid;
-                           }
-                         }
-                       }
-                     });
-
-      [_channel invokeMethod:@"Messaging#onBackgroundMessage"
-                   arguments:notificationDict
-                      result:^(id _Nullable result) {
-                        @synchronized(self) {
-                          if (completed == NO) {
-                            completed = YES;
-                            completionHandler(UIBackgroundFetchResultNewData);
-                            if (backgroundTaskId != UIBackgroundTaskInvalid) {
-                              [application endBackgroundTask:backgroundTaskId];
-                              backgroundTaskId = UIBackgroundTaskInvalid;
-                            }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25 * NSEC_PER_SEC)),
+                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+                      @synchronized(self) {
+                        if (completed == NO) {
+                          completed = YES;
+                          completionHandler(UIBackgroundFetchResultNewData);
+                          if (backgroundTaskId != UIBackgroundTaskInvalid) {
+                            [application endBackgroundTask:backgroundTaskId];
+                            backgroundTaskId = UIBackgroundTaskInvalid;
                           }
                         }
-                      }];
-    } else {
-      // If "alert" (i.e. notification) is present in userInfo, this will be called by the other
-      // "Messaging#onMessage" channel handler
-      if (userInfo[@"aps"] != nil && userInfo[@"aps"][@"alert"] == nil) {
-        [_channel invokeMethod:@"Messaging#onMessage" arguments:notificationDict];
-      }
-      completionHandler(UIBackgroundFetchResultNoData);
-    }
+                      }
+                    });
 
-    return YES;
-  }  // if (userInfo[@"gcm.message_id"])
-  return NO;
+    [_channel invokeMethod:@"Messaging#onBackgroundMessage"
+                  arguments:notificationDict
+                    result:^(id _Nullable result) {
+                      @synchronized(self) {
+                        if (completed == NO) {
+                          completed = YES;
+                          completionHandler(UIBackgroundFetchResultNewData);
+                          if (backgroundTaskId != UIBackgroundTaskInvalid) {
+                            [application endBackgroundTask:backgroundTaskId];
+                            backgroundTaskId = UIBackgroundTaskInvalid;
+                          }
+                        }
+                      }
+                    }];
+  } else {
+    // If "alert" (i.e. notification) is present in userInfo, this will be called by the other
+    // "Messaging#onMessage" channel handler
+    if (userInfo[@"aps"] != nil && userInfo[@"aps"][@"alert"] == nil) {
+      [_channel invokeMethod:@"Messaging#onMessage" arguments:notificationDict];
+    }
+    completionHandler(UIBackgroundFetchResultNoData);
+  }
+
+  return YES;
 }  // didReceiveRemoteNotification
 #endif
 
@@ -845,8 +852,7 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
   // message.data
   for (id key in userInfo) {
     // message.messageId
-    if ([key isEqualToString:@"gcm.message_id"] || [key isEqualToString:@"google.message_id"] ||
-        [key isEqualToString:@"message_id"]) {
+    if ([key isEqualToString:@"google.message_id"] || [key isEqualToString:@"message_id"]) {
       message[@"messageId"] = userInfo[key];
       continue;
     }
@@ -896,7 +902,7 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
 
     data[key] = userInfo[key];
   }
-  message[@"data"] = data;
+  // message[@"data"] = data;
 
   if (userInfo[@"aps"] != nil) {
     NSDictionary *apsDict = userInfo[@"aps"];
@@ -982,6 +988,10 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
         if (apsDict[@"badge"] != nil) {
           notificationIOS[@"badge"] = [NSString stringWithFormat:@"%@", apsDict[@"badge"]];
         }
+        
+        if (apsAlertDict[@"data"] != nil) {
+          data[@"params"] = apsAlertDict[@"data"];
+        }
       }
 
       notification[@"apple"] = notificationIOS;
@@ -1024,6 +1034,8 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
       message[@"notification"] = notification;
     }
   }
+  
+  message[@"data"] = data;
 
   return message;
 }
@@ -1045,8 +1057,7 @@ NSString *const kMessagingPresentationOptionsUserDefaults =
   @synchronized(self) {
     // Only return if initial notification was sent when app is terminated. Also ensure that
     // it was the initial notification that was tapped to open the app.
-    if (_initialNotification != nil &&
-        [_initialNotificationID isEqualToString:_notificationOpenedAppID]) {
+    if (_initialNotification != nil) {
       NSDictionary *initialNotificationCopy = [_initialNotification copy];
       _initialNotification = nil;
       return initialNotificationCopy;
